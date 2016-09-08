@@ -1,0 +1,3 @@
+[submodule "hs-tar-conduit"]
+	path = hs-tar-conduit
+	url = https://github.com/txkaduo/hs-tar-conduit.git
