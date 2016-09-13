@@ -29,10 +29,10 @@ executable apt-log-analizer
                      , conduit-combinators
                      , bzlib-conduit
                      , tar-conduit
-                     , csv-conduit
+                     , cassava
+                     , cassava-conduit
                      , resourcet
                      , either
-                     , exceptions
                      , bytestring
                      , bytestring-trie
                      , deepseq
