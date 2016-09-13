@@ -1,3 +1,5 @@
+{-# LANGUAGE BangPatterns #-}
+
 module Main where
 import Data.Conduit (ConduitM, (=$=), transPipe, runConduit)
 import Data.Conduit.List (sourceList)
@@ -13,7 +15,7 @@ import qualified Data.Trie as T
 import System.Environment (getArgs)
 import Control.Monad.Trans.Resource (ResourceT, transResourceT, runResourceT)
 import Control.Monad.Trans.Either (EitherT, bimapEitherT, runEitherT)
-import Control.DeepSeq (force)
+import Control.DeepSeq (NFData(..), force)
 import Data.Foldable (for_)
 import Text.Printf (printf)
 import Data.Char (ord)
@@ -43,12 +45,15 @@ csvPipeline :: FilePath -> ConduitM BS.ByteString (Either CsvStreamRecordParseEr
 csvPipeline fileName = fromCsvStreamError options NoHeader (CsvError fileName)
   where options = DecodeOptions { decDelimiter = fromIntegral (ord '?') }
 
+instance NFData (T.Trie a) where
+  rnf !t = ()
+
 pipeline :: FilePath -> ConduitM i o M [T.Trie ()]
 pipeline fileName = sourceFile fileName =$=
                     tarBz2Pipeline =$=
                     iterMC (liftIO . putStrLn . fst) =$=
                     concatMapMC runCsvPipeline =$=
-                    foldlC (force . zipWith setInsert) emptySets
+                    foldlC addToSets emptySets
   where runCsvPipeline (name, lbs) = runConduit pipe
           where pipe = sourceLazy lbs =$=
                        csvPipeline name =$=
@@ -60,8 +65,9 @@ pipeline fileName = sourceFile fileName =$=
                   Left e  -> liftIO $ putStrLn (name ++ ": " ++ show e)
                   Right _ -> return ()
         fromRight (Right x) = x
-        setInsert s e = T.insert e () s
-        emptySets = repeat T.empty
+        addToSets ss ee = zipWith setInsert (force ss) (force ee) 
+        setInsert s e = force (T.insert e () s)
+        emptySets = replicate 130 T.empty
 
 processResults res = for_ (zip [(1 :: Int)..] res) $ \(i, s) -> do
  putStrLn (printf "%03d -> %d" i (T.size s))
