@@ -1,0 +1,32 @@
+{ "separator": "?",
+  "num_of_columns": 130,
+  "columns": [
+    { "idx":  3,
+      "name": "start_time_of_date",
+      "type": "microsecond_timestamp",
+      "nullable": false },
+    { "idx": 12,
+      "name": "origination_source_number",
+      "type": "text",
+      "nullable": true },
+    { "idx": 14,
+      "name": "origination_destination_number",
+      "type": "text",
+      "nullable": true },
+    { "idx": 56,
+      "name": "ingress_id",
+      "type": "int",
+      "nullable": true },
+    { "idx": 65,
+      "name": "egress_id",
+      "type": "int",
+      "nullable": true },
+    { "idx": 96,
+      "name": "order_id",
+      "type": "int",
+      "nullable": true }
+  ]
+}
+
+
+
