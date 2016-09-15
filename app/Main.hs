@@ -65,9 +65,9 @@ pipeline fileName = sourceFile fileName =$=
                   Left e  -> liftIO $ putStrLn (name ++ ": " ++ show e)
                   Right _ -> return ()
         fromRight (Right x) = x
-        addToSets ss ee = zipWith setInsert (force ss) (force ee) 
-        setInsert s e = force (T.insert e () s)
-        emptySets = replicate 130 T.empty
+        addToSets ss ee = force (zipWith setInsert ss ee)
+        setInsert s e = T.insert e () s
+        emptySets = repeat T.empty
 
 processResults res = for_ (zip [(1 :: Int)..] res) $ \(i, s) -> do
  putStrLn (printf "%03d -> %d" i (T.size s))
