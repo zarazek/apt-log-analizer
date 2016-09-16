@@ -7,8 +7,9 @@ import Conduit
 import Data.Conduit.BZlib (bunzip2)
 import Codec.Archive.Tar (conduitEntry, FormatError)
 import Codec.Archive.Tar.Entry (entryPath, entryContent, EntryContent(..))
-import Data.Csv (DecodeOptions(..), HasHeader(..))
-import Data.Csv.Conduit (CsvStreamHaltParseError, CsvStreamRecordParseError, fromCsvStreamError)
+import Data.Csv (DecodeOptions(..), HasHeader(..), Record, Parser, parseField)
+import Data.Csv.Conversion (parseUnsigned)
+import Data.Csv.Conduit (CsvStreamHaltParseError, CsvStreamRecordParseError, fromCsvStreamError, fromCsvStreamError')
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
 import qualified Data.Trie as M
@@ -20,12 +21,19 @@ import Data.Foldable (for_)
 import Text.Printf (printf)
 import Data.Char (ord)
 import Data.Either (isRight)
-import Data.List (intersperse)
+import Data.List (intersperse, foldl')
 
 import Data.Aeson ((.:))
 import qualified Data.Aeson as A
 import qualified Data.Aeson.Types as A (typeMismatch)
 import qualified Data.Text as T
+
+import Data.Time.Clock (UTCTime)
+import Data.Time.Clock.POSIX (posixSecondsToUTCTime)
+import Data.Ratio ((%))
+
+import qualified Data.HashMap.Strict as HM
+import qualified Data.Vector as V
 
 data PipelineError = TarError FormatError
                    | CsvError FilePath CsvStreamHaltParseError
@@ -59,7 +67,7 @@ instance A.FromJSON ColumnType where
                               _                       -> fail $ concat ["unknown column type '", T.unpack str, "'"]
   parseJSON invalid      = A.typeMismatch "ColumnType" invalid
 
-data ColumnDescription = ColumnDescription { cdIndex    :: Word
+data ColumnDescription = ColumnDescription { cdIndex    :: Int
                                            , cdName     :: T.Text
                                            , cdType     :: ColumnType
                                            , cdNullable :: Bool }
@@ -73,7 +81,7 @@ instance A.FromJSON ColumnDescription where
   parseJSON invalid       = A.typeMismatch "ColumnDescription" invalid
 
 data CsvFormat = CsvFormat { cfSeparator          :: Char
-                           , cfNumOfColumns       :: Word
+                           , cfNumOfColumns       :: Int
                            , cfInterestingColumns :: [ColumnDescription] }
 
 instance A.FromJSON CsvFormat where
@@ -94,9 +102,57 @@ instance A.FromJSON CsvFormat where
                                            (T.unpack name) idx (numOfColumns - 1)
                   numOfColumns = cfNumOfColumns fmt
 
+parseMicrosecondTimestamp :: BS.ByteString -> Parser UTCTime
+parseMicrosecondTimestamp bs = convert <$> parseUnsigned "Number of microseconds since 1970.01.01 00:00:00" bs
+  where convert us = posixSecondsToUTCTime (realToFrac (us % 1000000))
+
+parseNullable :: (BS.ByteString -> Parser a) -> BS.ByteString -> Parser (Maybe a)
+parseNullable _ "NULL" = pure Nothing
+parseNullable p bs     = Just <$> p bs
+
+data CsvValue = CsvTimestamp UTCTime
+              | CsvNullableTimestamp (Maybe UTCTime)
+              | CsvText T.Text
+              | CsvNullableText (Maybe T.Text)
+              | CsvInt Int
+              | CsvNullableInt (Maybe Int)
+  deriving (Eq, Show)
+
+parseCsvValue :: ColumnType -> Bool -> BS.ByteString -> Parser CsvValue
+parseCsvValue ctype nullable = case (ctype, nullable) of
+                                 (CTMicrosecondTimestamp, False) -> \bs -> CsvTimestamp <$> parseMicrosecondTimestamp bs
+                                 (CTMicrosecondTimestamp, True)  -> \bs -> CsvNullableTimestamp <$> parseNullable parseMicrosecondTimestamp bs
+                                 (CTText, False)                 -> \bs -> CsvText <$> parseField bs
+                                 (CTText, True)                  -> \bs -> CsvNullableText <$> parseNullable parseField bs
+                                 (CTInt, False)                  -> \bs -> CsvInt <$> parseUnsigned "Positive integer" bs
+                                 (CTInt, True)                   -> \bs -> CsvNullableInt <$> parseNullable (parseUnsigned "Positive inteter") bs
+
+type CsvRecord = HM.HashMap T.Text CsvValue
+
+parseCsvRecord :: Int -> [ColumnDescription] -> Record -> Parser CsvRecord
+parseCsvRecord numOfCols colDscs = parser
+  where parser allCols = case len == numOfCols of
+                            True  -> do
+                                       parsedCols <- sequence $ zipWith ($) colParsers selectedCols
+                                       return $ foldIntoRecord parsedCols
+                            False -> fail $ printf "Expected %d fields, got %d" numOfCols len
+          where len = V.length allCols
+                selectedCols = V.toList $ V.backpermute allCols indices
+        colParsers = map makeColParser colDscs
+        makeColParser colDsc =  parseCsvValue (cdType colDsc) (cdNullable colDsc)
+        indices = V.fromList (map cdIndex colDscs)
+        names = map cdName colDscs
+        foldIntoRecord vals = foldl' addToRecord HM.empty $ zip names vals
+        addToRecord m (name, value) = HM.insert name value m
+
 csvPipeline :: FilePath -> ConduitM BS.ByteString (Either CsvStreamRecordParseError [BS.ByteString]) M ()
 csvPipeline fileName = fromCsvStreamError options NoHeader (CsvError fileName)
   where options = DecodeOptions { decDelimiter = fromIntegral (ord '?') }
+
+newCsvPipeline :: CsvFormat -> FilePath -> ConduitM BS.ByteString (Either CsvStreamRecordParseError CsvRecord) M ()
+newCsvPipeline format fileName = fromCsvStreamError' parser options NoHeader (CsvError fileName)
+  where parser = parseCsvRecord (cfNumOfColumns format) (cfInterestingColumns format)
+        options = DecodeOptions { decDelimiter = fromIntegral $ ord $ cfSeparator format }
 
 instance NFData (M.Trie a) where
   rnf !t = ()
@@ -122,19 +178,47 @@ pipeline fileName = sourceFile fileName =$=
         setInsert s e = M.insert e () s
         emptySets = repeat M.empty
 
+addNewLine bs = BS.snoc bs newLineChar
+  where newLineChar = fromIntegral (ord '\n')
+
 processResults res = for_ (zip [(1 :: Int)..] res) $ \(i, s) -> do
  putStrLn (printf "%03d -> %d" i (M.size s))
  let pipeline = sourceList (M.keys s) =$=
-                mapC (flip BS.snoc (fromIntegral (ord '\n'))) =$=
+                mapC addNewLine =$=
                 sinkFile (printf "%03d.txt" i)
  runResourceT (runConduit pipeline)
 
+newPipeline :: CsvFormat -> FilePath -> FilePath -> ConduitM i o M ()
+newPipeline config inputFile outputFile = sourceFile inputFile =$=
+                                          tarBz2Pipeline =$=
+                                          iterMC (liftIO . putStrLn . fst) =$=
+                                          concatMapMC runCsvPipeline =$=
+                                          mapC (addNewLine . BS.pack . map (fromIntegral . ord) . show) =$=
+                                          sinkFile outputFile
+  where runCsvPipeline (name, lbs) = runConduit pipe
+          where pipe = sourceLazy lbs =$=
+                       cvsPipe name =$=
+                       iterMC printError =$=
+                       filterC isRight =$=
+                       mapC fromRight =$=
+                       sinkList
+                printError x = case x of
+                  Left e  -> liftIO $ putStrLn (name ++ ": " ++ show e)
+                  Right _ -> return ()
+        cvsPipe = newCsvPipeline config
+        fromRight (Right x) = x
+        addToSets ss ee = force (zipWith setInsert ss ee)
+        setInsert s e = M.insert e () s
+        emptySets = repeat M.empty
+
 main :: IO ()
 main = do
-  [confFile, inputFile] <- getArgs
-  (config :: Either String CsvFormat) <- A.eitherDecode' <$> LBS.readFile confFile
-  case config of
-    Left err -> putStrLn err
-    _        -> do
-                  res <- runEitherT $ runResourceT $ runConduit $ pipeline inputFile
-                  either print processResults res
+  [confFile, inputFile, outputFile] <- getArgs
+  maybeConfig <- A.eitherDecode' <$> LBS.readFile confFile
+  case maybeConfig of
+    Left err     -> putStrLn err
+    Right config -> do
+                      res1 <- runEitherT $ runResourceT $ runConduit $ pipeline inputFile
+                      either print processResults res1
+                      res2 <- runEitherT $ runResourceT $ runConduit $ newPipeline config inputFile outputFile
+                      either print return res2

@@ -38,6 +38,9 @@ executable apt-log-analizer
                      , deepseq
                      , aeson
                      , text
+                     , time
+                     , unordered-containers
+                     , vector
   default-language:    Haskell2010
 
 test-suite simple-test
