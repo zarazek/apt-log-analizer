@@ -1,3 +1,9 @@
 [submodule "hs-tar-conduit"]
 	path = hs-tar-conduit
 	url = https://github.com/zarazek/hs-tar-conduit.git
+[submodule "cassava"]
+	path = cassava
+	url = https://github.com/zarazek/cassava.git
+[submodule "cassava-conduit"]
+	path = cassava-conduit
+	url = https://github.com/zarazek/cassava-conduit.git
